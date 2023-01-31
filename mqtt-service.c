@@ -29,27 +29,30 @@
  *
  */
 
-#include "contiki.h"
-#include "contiki-net.h"
-#include "sys/etimer.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
+#include <freertos/task.h>
+#include <freertos/timers.h>
+#include <esp_log.h>
 
 #include <string.h>
 #include <stdio.h>
+#include <sys/socket.h>
 
 #include "mqtt-service.h"
 
+#define TAG __FILE_NAME__
 
 typedef struct mqtt_state_t
 {
-  uip_ip6addr_t address;
+  ip_addr_t address;
   uint16_t port;
   int auto_reconnect;
   mqtt_connect_info_t* connect_info;
 
-  struct process* calling_process;
-  struct uip_conn* tcp_connection;
+  void(*calling_process)(mqtt_event_data_t* event_data);
+  int tcp_connection;
 
-  struct psock ps;
   uint8_t* in_buffer;
   uint8_t* out_buffer;
   int in_buffer_length;
@@ -63,11 +66,11 @@ typedef struct mqtt_state_t
 
 } mqtt_state_t;
 
-PROCESS(mqtt_process, "MQTT Process");
+void mqtt_process(void* arg);
 
-process_event_t mqtt_event;
+EventGroupHandle_t mqtt_event IRAM_BSS_ATTR;
 mqtt_state_t mqtt_state;
-int mqtt_flags = 0;
+int mqtt_flags IRAM_BSS_ATTR;
 
 
 /*********************************************************************
@@ -79,8 +82,6 @@ int mqtt_flags = 0;
 // Initialise the MQTT client, must be called before anything else
 void mqtt_init(uint8_t* in_buffer, int in_buffer_length, uint8_t* out_buffer, int out_buffer_length)
 {
-  mqtt_event = process_alloc_event();
-
   mqtt_state.in_buffer = in_buffer;
   mqtt_state.in_buffer_length = in_buffer_length;
   mqtt_state.out_buffer = out_buffer;
@@ -88,17 +89,19 @@ void mqtt_init(uint8_t* in_buffer, int in_buffer_length, uint8_t* out_buffer, in
 }
 
 // Connect to the specified server
-int mqtt_connect(uip_ip6addr_t* address, uint16_t port, int auto_reconnect, mqtt_connect_info_t* info)
+int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_connect_info_t* info, void(*calling_process)(mqtt_event_data_t*))
 {
-  if(process_is_running(&mqtt_process))
+  if(mqtt_event)
     return -1;
 
   mqtt_state.address = *address;
   mqtt_state.port = port;
   mqtt_state.auto_reconnect = auto_reconnect;
   mqtt_state.connect_info = info;
-  mqtt_state.calling_process = PROCESS_CURRENT();
-  process_start(&mqtt_process, (void*)&mqtt_state);
+  mqtt_state.calling_process = calling_process;
+
+  mqtt_event = xEventGroupCreate();
+  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 5, NULL);
 
   return 0;
 }
@@ -106,13 +109,17 @@ int mqtt_connect(uip_ip6addr_t* address, uint16_t port, int auto_reconnect, mqtt
 // Disconnect from the server
 int mqtt_disconnect()
 {
-  if(!process_is_running(&mqtt_process))
+  if(mqtt_event)
     return -1;
 
-  printf("mqtt: exiting...\n");
+  ESP_LOGI(TAG, "mqtt: exiting...");
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_flags |= MQTT_FLAG_EXIT;
-  tcpip_poll_tcp(mqtt_state.tcp_connection);
+
+  xEventGroupSetBits(mqtt_event, BIT0);
+  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
+  vEventGroupDelete(mqtt_event);
+  mqtt_event = NULL;
 
   return 0;
 }
@@ -123,13 +130,14 @@ int mqtt_subscribe(const char* topic)
   if(!mqtt_ready())
     return -1;
 
-  printf("mqtt: sending subscribe...\n");
+  ESP_LOGD(TAG, "mqtt: sending subscribe...");
   mqtt_state.outbound_message = mqtt_msg_subscribe(&mqtt_state.mqtt_connection, 
                                                    topic, 0, 
                                                    &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SUBSCRIBE;
-  tcpip_poll_tcp(mqtt_state.tcp_connection);
+  xEventGroupSetBits(mqtt_event, BIT0);
+  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
 
   return 0;
 }
@@ -139,12 +147,13 @@ int mqtt_unsubscribe(const char* topic)
   if(!mqtt_ready())
     return -1;
 
-  printf("sending unsubscribe\n");
+  ESP_LOGD(TAG, "sending unsubscribe");
   mqtt_state.outbound_message = mqtt_msg_unsubscribe(&mqtt_state.mqtt_connection, topic, 
                                                      &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
-  tcpip_poll_tcp(mqtt_state.tcp_connection);
+  xEventGroupSetBits(mqtt_event, BIT0);
+  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
 
   return 0;
 }
@@ -155,14 +164,15 @@ int mqtt_publish_with_length(const char* topic, const char* data, int data_lengt
   if(!mqtt_ready())
     return -1;
 
-  printf("mqtt: sending publish...\n");
+  ESP_LOGD(TAG, "mqtt: sending publish...");
   mqtt_state.outbound_message = mqtt_msg_publish(&mqtt_state.mqtt_connection, 
                                                  topic, data, data_length, 
                                                  qos, retain,
                                                  &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_PUBLISH;
-  tcpip_poll_tcp(mqtt_state.tcp_connection);
+  xEventGroupSetBits(mqtt_event, BIT0);
+  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
 
   return 0;
 }
@@ -181,7 +191,8 @@ static void complete_pending(mqtt_state_t* state, int event_type)
   state->pending_msg_type = 0;
   mqtt_flags |= MQTT_FLAG_READY;
   event_data.type = event_type;
-  process_post_synch(state->calling_process, mqtt_event, &event_data);
+
+  state->calling_process(&event_data);
 }
 
 static void deliver_publish(mqtt_state_t* state, uint8_t* message, int length)
@@ -201,7 +212,7 @@ static void deliver_publish(mqtt_state_t* state, uint8_t* message, int length)
   ((char*)event_data.topic)[event_data.topic_length] = '\0';
   ((char*)event_data.data)[event_data.data_length] = '\0';
 
-  process_post_synch(state->calling_process, mqtt_event, &event_data);
+  state->calling_process(&event_data);
 }
 
 static void deliver_publish_continuation(mqtt_state_t* state, uint16_t offset, uint8_t* buffer, uint16_t length)
@@ -216,75 +227,72 @@ static void deliver_publish_continuation(mqtt_state_t* state, uint16_t offset, u
   event_data.data = (char*)buffer;
   ((char*)event_data.data)[event_data.data_length] = '\0';
 
-  process_post_synch(state->calling_process, mqtt_event, &event_data);
+  state->calling_process(&event_data);
 }
 
-static PT_THREAD(handle_mqtt_connection(mqtt_state_t* state))
+static void handle_mqtt_connection(mqtt_state_t* state)
 {
-  static struct etimer keepalive_timer;
-
   uint8_t msg_type;
   uint8_t msg_qos;
   uint16_t msg_id;
 
-  PSOCK_BEGIN(&state->ps);
-
   // Initialise and send CONNECT message
   mqtt_msg_init(&state->mqtt_connection, state->out_buffer, state->out_buffer_length);
-  state->outbound_message =  mqtt_msg_connect(&state->mqtt_connection, state->connect_info);
-  PSOCK_SEND(&state->ps, state->outbound_message->data, state->outbound_message->length);
+  state->outbound_message = mqtt_msg_connect(&state->mqtt_connection, state->connect_info);
+  send(state->tcp_connection, state->outbound_message->data, state->outbound_message->length, 0);
   state->outbound_message = NULL;
 
   // Wait for CONACK message
-  PSOCK_READBUF_LEN(&state->ps, 2);
+  if(recv(state->tcp_connection, state->in_buffer, state->in_buffer_length, 0) < 2)
+    return;
   if(mqtt_get_type(state->in_buffer) != MQTT_MSG_TYPE_CONNACK)
-    PSOCK_CLOSE_EXIT(&state->ps);
-  
+    return;
+
   // Tell the client we're connected
   mqtt_flags |= MQTT_FLAG_CONNECTED;
   complete_pending(state, MQTT_EVENT_TYPE_CONNECTED);
-
-  // Setup the keep alive timer and enter main message processing loop
-  etimer_set(&keepalive_timer, CLOCK_SECOND * state->connect_info->keepalive);
   while(1)
   {
     // Wait for something to happen: 
     //   new incoming data, 
     //   new outgoing data, 
     //   keep alive timer expired
-    PSOCK_WAIT_UNTIL(&state->ps, PSOCK_NEWDATA(&state->ps) || 
-                                 state->outbound_message != NULL ||
-                                 etimer_expired(&keepalive_timer));
+    while(1)
+    {
+      fd_set set;
+      FD_ZERO(&set);
+      FD_SET(state->tcp_connection, &set);
+      struct timeval tv;
+      tv.tv_sec = 0;
+      tv.tv_usec = 0;
+      if(select(state->tcp_connection + 1, &set, NULL, NULL, &tv) > 0 && FD_ISSET(state->tcp_connection, &set))
+        break;
+      if(state->outbound_message != NULL)
+        break;
+      vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
 
     // If there's a new message waiting to go out, then send it
     if(state->outbound_message != NULL)
     {
-      PSOCK_SEND(&state->ps, state->outbound_message->data, state->outbound_message->length);
+      send(state->tcp_connection, state->outbound_message->data, state->outbound_message->length, 0);
       state->outbound_message = NULL;
 
       // If it was a PUBLISH message with QoS-0 then tell the client it's done
       if(state->pending_msg_type == MQTT_MSG_TYPE_PUBLISH && state->pending_msg_id == 0)
         complete_pending(state, MQTT_EVENT_TYPE_PUBLISHED);
 
-      // Reset the keepalive timer as we've just sent some data
-      etimer_restart(&keepalive_timer);
-      continue;
-    }
-
-    // If the keep-alive timer expired then prepare a ping for sending
-    // and reset the timer
-    if(etimer_expired(&keepalive_timer))
-    {
-      state->outbound_message = mqtt_msg_pingreq(&state->mqtt_connection);
-      etimer_reset(&keepalive_timer);
+      xEventGroupSetBits(mqtt_event, BIT1);
       continue;
     }
 
     // If we get here we must have woken for new incoming data, 
     // read and process it.
-    PSOCK_READBUF_LEN(&state->ps, 2);
-    
-    state->message_length_read = PSOCK_DATALEN(&state->ps);
+    int16_t len = recv(state->tcp_connection, state->in_buffer, state->in_buffer_length, 0);
+    if(len < 2)
+      return;
+
+    state->message_length_read = len;
     state->message_length = mqtt_get_total_length(state->in_buffer, state->message_length_read);
 
     msg_type = mqtt_get_type(state->in_buffer);
@@ -335,7 +343,7 @@ static PT_THREAD(handle_mqtt_connection(mqtt_state_t* state))
     //       statement due to the way protothreads resume.
     if(msg_type == MQTT_MSG_TYPE_PUBLISH)
     {
-      uint16_t len;
+      int16_t len;
 
       // adjust message_length and message_length_read so that
       // they only account for the publish data and not the rest of the 
@@ -350,63 +358,72 @@ static PT_THREAD(handle_mqtt_connection(mqtt_state_t* state))
 
       while(state->message_length_read < state->message_length)
       {
-        PSOCK_READBUF_LEN(&state->ps, state->message_length - state->message_length_read);
-        deliver_publish_continuation(state, state->message_length_read, state->in_buffer, PSOCK_DATALEN(&state->ps));
-        state->message_length_read += PSOCK_DATALEN(&state->ps);
+        len = recv(state->tcp_connection, state->in_buffer, state->message_length - state->message_length_read, 0);
+        if(len <= 0)
+          return;
+        deliver_publish_continuation(state, state->message_length_read, state->in_buffer, len);
+        state->message_length_read += len;
       }
     }
   }
-
-  PSOCK_END(&state->ps);
 }
 
-PROCESS_THREAD(mqtt_process, ev, data)
+void mqtt_process(void* arg)
 {
   mqtt_event_data_t event_data;
 
-  PROCESS_BEGIN();
-
   while(1)
   {
-    printf("mqtt: connecting...\n");
-    mqtt_state.tcp_connection = tcp_connect(&mqtt_state.address, 
-                                            mqtt_state.port, NULL);
-    PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
-
-    if(!uip_connected())
+    ESP_LOGI(TAG, "mqtt: connecting...");
+    mqtt_state.tcp_connection = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if(mqtt_state.tcp_connection >= 0)
     {
-      printf("mqtt: connect failed\n");
+      struct sockaddr_in sockaddr = {};
+      sockaddr.sin_len = sizeof(sockaddr);
+      sockaddr.sin_family = AF_INET;
+      sockaddr.sin_port = htons(mqtt_state.port);
+      sockaddr.sin_addr.s_addr = mqtt_state.address.addr;
+      if(connect(mqtt_state.tcp_connection, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) != 0)
+      {
+        close(mqtt_state.tcp_connection);
+        mqtt_state.tcp_connection = -1;
+      }
+    }
+
+    if(mqtt_state.tcp_connection < 0)
+    {
+      ESP_LOGI(TAG, "mqtt: connect failed");
       continue;
     }
     else
-      printf("mqtt: connected\n");
-
-    // reserve one byte at the end of the buffer so there's space to NULL terminate
-    PSOCK_INIT(&mqtt_state.ps, mqtt_state.in_buffer, mqtt_state.in_buffer_length - 1);
+      ESP_LOGI(TAG, "mqtt: connected");
 
     handle_mqtt_connection(&mqtt_state);
 
     while(1)
     {
-      PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
-
       if(mqtt_flags & MQTT_FLAG_EXIT)
       {
-        uip_close();
+        close(mqtt_state.tcp_connection);
+        mqtt_state.tcp_connection = -1;
 
         event_data.type = MQTT_EVENT_TYPE_EXITED;
-        process_post_synch(mqtt_state.calling_process, mqtt_event, &event_data);
-        PROCESS_EXIT();
+        mqtt_state.calling_process(&event_data);
+        xEventGroupSetBits(mqtt_event, BIT1);
+        vTaskDelete(NULL);
       }
 
-      if(uip_aborted() || uip_timedout() || uip_closed())
+      int opt = 0;
+      socklen_t optlen = sizeof(opt);
+      getsockopt(mqtt_state.tcp_connection, SOL_SOCKET, SO_ERROR, &opt, &optlen);
+      if(opt != 0)
       {
+        close(mqtt_state.tcp_connection);
+        mqtt_state.tcp_connection = -1;
+
         event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
-        process_post_synch(mqtt_state.calling_process, mqtt_event, &event_data);
-        printf("mqtt: lost connection: %s\n", uip_aborted() ? "aborted" : 
-                                              uip_timedout() ? "timed out" : 
-                                              uip_closed() ? "closed" : 
-                                              "unknown");
+        mqtt_state.calling_process(&event_data);
+        ESP_LOGI(TAG, "mqtt: lost connection: %s", "closed");
         break;
       }
       else
@@ -415,10 +432,11 @@ PROCESS_THREAD(mqtt_process, ev, data)
 
     if(!mqtt_state.auto_reconnect)
       break;
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 
   event_data.type = MQTT_EVENT_TYPE_EXITED;
-  process_post_synch(mqtt_state.calling_process, mqtt_event, &event_data);
-
-  PROCESS_END();
+  mqtt_state.calling_process(&event_data);
+  xEventGroupSetBits(mqtt_event, BIT1);
+  vTaskDelete(NULL);
 }

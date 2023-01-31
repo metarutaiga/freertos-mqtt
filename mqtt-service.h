@@ -33,7 +33,6 @@
 #define MQTT_SERVICE_H_
 
 #include <stdio.h>
-#include "uip.h"
 #include "mqtt-msg.h"
 
 #define MQTT_FLAG_CONNECTED          1
@@ -62,7 +61,6 @@ typedef struct mqtt_event_data_t
 } mqtt_event_data_t;
 
 extern int mqtt_flags;
-extern process_event_t mqtt_event;
 
 
 // Must be called before any other function is  called.
@@ -86,8 +84,9 @@ void mqtt_init(uint8_t* in_buffer, int in_buffer_length,
 // MQTT_EVENT_CONNECTED when the operation is complete.
 // Or an event of type MQTT_EVENT_DISCONNECTED if the
 // connect attempt fails.
-int mqtt_connect(uip_ip6addr_t* address, uint16_t port, 
-                 int auto_reconnect, mqtt_connect_info_t* info);
+int mqtt_connect(ip_addr_t* address, uint16_t port, 
+                 int auto_reconnect, mqtt_connect_info_t* info,
+                 void(*calling_process)(mqtt_event_data_t*));
 
 // Starts an asynchronous disconnect from the server.
 // The calling process will receive a mqtt_event of type
