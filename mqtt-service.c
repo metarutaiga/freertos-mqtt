@@ -385,7 +385,7 @@ void mqtt_process(void* arg)
       sockaddr.sin_addr.s_addr = mqtt_state.address.addr;
       if(connect(mqtt_state.tcp_connection, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) != 0)
       {
-        close(mqtt_state.tcp_connection);
+        closesocket(mqtt_state.tcp_connection);
         mqtt_state.tcp_connection = -1;
       }
     }
@@ -404,7 +404,7 @@ void mqtt_process(void* arg)
     {
       if(mqtt_flags & MQTT_FLAG_EXIT)
       {
-        close(mqtt_state.tcp_connection);
+        closesocket(mqtt_state.tcp_connection);
         mqtt_state.tcp_connection = -1;
 
         event_data.type = MQTT_EVENT_TYPE_EXITED;
@@ -418,7 +418,7 @@ void mqtt_process(void* arg)
       getsockopt(mqtt_state.tcp_connection, SOL_SOCKET, SO_ERROR, &opt, &optlen);
       if(opt != 0)
       {
-        close(mqtt_state.tcp_connection);
+        closesocket(mqtt_state.tcp_connection);
         mqtt_state.tcp_connection = -1;
 
         event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
