@@ -30,7 +30,6 @@
  */
 
 #include <freertos/FreeRTOS.h>
-#include <freertos/event_groups.h>
 #include <freertos/task.h>
 #include <freertos/timers.h>
 #include <esp_log.h>
@@ -68,7 +67,7 @@ typedef struct mqtt_state_t
 
 void mqtt_process(void* arg);
 
-EventGroupHandle_t mqtt_event IRAM_BSS_ATTR;
+QueueHandle_t mqtt_event IRAM_BSS_ATTR;
 mqtt_state_t mqtt_state;
 int mqtt_flags IRAM_BSS_ATTR;
 
@@ -100,7 +99,7 @@ int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_con
   mqtt_state.connect_info = info;
   mqtt_state.calling_process = calling_process;
 
-  mqtt_event = xEventGroupCreate();
+  mqtt_event = xSemaphoreCreateCounting(1, 0);
   xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 5, NULL);
 
   return 0;
@@ -115,10 +114,8 @@ int mqtt_disconnect()
   ESP_LOGI(TAG, "mqtt: exiting...");
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_flags |= MQTT_FLAG_EXIT;
-
-  xEventGroupSetBits(mqtt_event, BIT0);
-  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
-  vEventGroupDelete(mqtt_event);
+  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
+  vSemaphoreDelete(mqtt_event);
   mqtt_event = NULL;
 
   return 0;
@@ -136,8 +133,7 @@ int mqtt_subscribe(const char* topic)
                                                    &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SUBSCRIBE;
-  xEventGroupSetBits(mqtt_event, BIT0);
-  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
+  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
 
   return 0;
 }
@@ -152,8 +148,7 @@ int mqtt_unsubscribe(const char* topic)
                                                      &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
-  xEventGroupSetBits(mqtt_event, BIT0);
-  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
+  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
 
   return 0;
 }
@@ -171,8 +166,7 @@ int mqtt_publish_with_length(const char* topic, const char* data, int data_lengt
                                                  &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_PUBLISH;
-  xEventGroupSetBits(mqtt_event, BIT0);
-  xEventGroupWaitBits(mqtt_event, BIT1, pdTRUE, pdFALSE, 3000 / portTICK_PERIOD_MS);
+  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
 
   return 0;
 }
@@ -282,7 +276,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
       if(state->pending_msg_type == MQTT_MSG_TYPE_PUBLISH && state->pending_msg_id == 0)
         complete_pending(state, MQTT_EVENT_TYPE_PUBLISHED);
 
-      xEventGroupSetBits(mqtt_event, BIT1);
+      xSemaphoreGive(mqtt_event);
       continue;
     }
 
@@ -409,7 +403,7 @@ void mqtt_process(void* arg)
 
         event_data.type = MQTT_EVENT_TYPE_EXITED;
         mqtt_state.calling_process(&event_data);
-        xEventGroupSetBits(mqtt_event, BIT1);
+        xSemaphoreGive(mqtt_event);
         vTaskDelete(NULL);
       }
 
@@ -437,6 +431,6 @@ void mqtt_process(void* arg)
 
   event_data.type = MQTT_EVENT_TYPE_EXITED;
   mqtt_state.calling_process(&event_data);
-  xEventGroupSetBits(mqtt_event, BIT1);
+  xSemaphoreGive(mqtt_event);
   vTaskDelete(NULL);
 }
