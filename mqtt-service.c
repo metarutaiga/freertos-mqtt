@@ -67,7 +67,8 @@ typedef struct mqtt_state_t
 
 void mqtt_process(void* arg);
 
-QueueHandle_t mqtt_event IRAM_BSS_ATTR;
+TaskHandle_t mqtt_internal IRAM_BSS_ATTR;
+TaskHandle_t mqtt_external IRAM_BSS_ATTR;
 mqtt_state_t mqtt_state;
 int mqtt_flags IRAM_BSS_ATTR;
 
@@ -90,7 +91,7 @@ void mqtt_init(uint8_t* in_buffer, int in_buffer_length, uint8_t* out_buffer, in
 // Connect to the specified server
 int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_connect_info_t* info, void(*calling_process)(mqtt_event_data_t*))
 {
-  if(mqtt_event)
+  if(mqtt_internal)
     return -1;
 
   mqtt_state.address = *address;
@@ -99,8 +100,8 @@ int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_con
   mqtt_state.connect_info = info;
   mqtt_state.calling_process = calling_process;
 
-  mqtt_event = xSemaphoreCreateCounting(1, 0);
-  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 5, NULL);
+  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 5, &mqtt_internal);
+  mqtt_external = NULL;
 
   return 0;
 }
@@ -108,15 +109,16 @@ int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_con
 // Disconnect from the server
 int mqtt_disconnect()
 {
-  if(mqtt_event)
+  if(mqtt_internal)
     return -1;
 
   ESP_LOGI(TAG, "mqtt: exiting...");
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_flags |= MQTT_FLAG_EXIT;
-  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
-  vSemaphoreDelete(mqtt_event);
-  mqtt_event = NULL;
+  mqtt_external = xTaskGetCurrentTaskHandle();
+  ulTaskNotifyTake(pdTRUE, 3000 / portTICK_PERIOD_MS);
+  mqtt_internal = NULL;
+  mqtt_external = NULL;
 
   return 0;
 }
@@ -133,7 +135,17 @@ int mqtt_subscribe(const char* topic)
                                                    &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SUBSCRIBE;
-  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
+  mqtt_external = xTaskGetCurrentTaskHandle();
+  if (mqtt_internal == mqtt_external)
+  {
+    send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
+    mqtt_state.outbound_message = NULL;
+    mqtt_flags |= MQTT_FLAG_READY;
+  }
+  else
+  {
+    ulTaskNotifyTake(pdTRUE, 3000 / portTICK_PERIOD_MS);
+  }
 
   return 0;
 }
@@ -148,7 +160,17 @@ int mqtt_unsubscribe(const char* topic)
                                                      &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
-  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
+  mqtt_external = xTaskGetCurrentTaskHandle();
+  if (mqtt_internal == mqtt_external)
+  {
+    send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
+    mqtt_state.outbound_message = NULL;
+    mqtt_flags |= MQTT_FLAG_READY;
+  }
+  else
+  {
+    ulTaskNotifyTake(pdTRUE, 3000 / portTICK_PERIOD_MS);
+  }
 
   return 0;
 }
@@ -166,7 +188,17 @@ int mqtt_publish_with_length(const char* topic, const char* data, int data_lengt
                                                  &mqtt_state.pending_msg_id);
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_PUBLISH;
-  xSemaphoreTake(mqtt_event, 3000 / portTICK_PERIOD_MS);
+  mqtt_external = xTaskGetCurrentTaskHandle();
+  if (mqtt_internal == mqtt_external)
+  {
+    send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
+    mqtt_state.outbound_message = NULL;
+    mqtt_flags |= MQTT_FLAG_READY;
+  }
+  else
+  {
+    ulTaskNotifyTake(pdTRUE, 3000 / portTICK_PERIOD_MS);
+  }
 
   return 0;
 }
@@ -276,7 +308,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
       if(state->pending_msg_type == MQTT_MSG_TYPE_PUBLISH && state->pending_msg_id == 0)
         complete_pending(state, MQTT_EVENT_TYPE_PUBLISHED);
 
-      xSemaphoreGive(mqtt_event);
+      xTaskNotifyGive(mqtt_external);
       continue;
     }
 
@@ -403,7 +435,7 @@ void mqtt_process(void* arg)
 
         event_data.type = MQTT_EVENT_TYPE_EXITED;
         mqtt_state.calling_process(&event_data);
-        xSemaphoreGive(mqtt_event);
+        xTaskNotifyGive(mqtt_external);
         vTaskDelete(NULL);
       }
 
@@ -431,6 +463,6 @@ void mqtt_process(void* arg)
 
   event_data.type = MQTT_EVENT_TYPE_EXITED;
   mqtt_state.calling_process(&event_data);
-  xSemaphoreGive(mqtt_event);
+  xTaskNotifyGive(mqtt_external);
   vTaskDelete(NULL);
 }
