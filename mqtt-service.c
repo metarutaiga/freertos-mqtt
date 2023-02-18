@@ -100,7 +100,7 @@ int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_con
   mqtt_state.connect_info = info;
   mqtt_state.calling_process = calling_process;
 
-  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 5, &mqtt_internal);
+  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 9, &mqtt_internal);
   mqtt_external = NULL;
 
   return 0;
