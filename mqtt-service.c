@@ -100,7 +100,7 @@ int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_con
   mqtt_state.connect_info = info;
   mqtt_state.calling_process = calling_process;
 
-  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 9, &mqtt_internal);
+  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 5, &mqtt_internal);
   mqtt_external = NULL;
 
   return 0;
@@ -136,7 +136,7 @@ int mqtt_subscribe(const char* topic)
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SUBSCRIBE;
   mqtt_external = xTaskGetCurrentTaskHandle();
-  if (mqtt_internal == mqtt_external)
+  if(mqtt_internal == mqtt_external)
   {
     send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
     mqtt_state.outbound_message = NULL;
@@ -161,7 +161,7 @@ int mqtt_unsubscribe(const char* topic)
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
   mqtt_external = xTaskGetCurrentTaskHandle();
-  if (mqtt_internal == mqtt_external)
+  if(mqtt_internal == mqtt_external)
   {
     send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
     mqtt_state.outbound_message = NULL;
@@ -189,7 +189,7 @@ int mqtt_publish_with_length(const char* topic, const char* data, int data_lengt
   mqtt_flags &= ~MQTT_FLAG_READY;
   mqtt_state.pending_msg_type = MQTT_MSG_TYPE_PUBLISH;
   mqtt_external = xTaskGetCurrentTaskHandle();
-  if (mqtt_internal == mqtt_external)
+  if(mqtt_internal == mqtt_external)
   {
     send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
     mqtt_state.outbound_message = NULL;
@@ -285,17 +285,15 @@ static void handle_mqtt_connection(mqtt_state_t* state)
     //   keep alive timer expired
     while(1)
     {
-      fd_set set;
-      FD_ZERO(&set);
-      FD_SET(state->tcp_connection, &set);
-      struct timeval tv;
-      tv.tv_sec = 0;
-      tv.tv_usec = 0;
-      if(select(state->tcp_connection + 1, &set, NULL, NULL, &tv) > 0 && FD_ISSET(state->tcp_connection, &set))
+      char c;
+      if(recv(state->tcp_connection, &c, sizeof(c), MSG_PEEK | MSG_DONTWAIT) != -1)
         break;
       if(state->outbound_message != NULL)
         break;
-      vTaskDelay(100 / portTICK_PERIOD_MS);
+      if(mqtt_flags & MQTT_FLAG_READY)
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+      else
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 
     // If there's a new message waiting to go out, then send it
