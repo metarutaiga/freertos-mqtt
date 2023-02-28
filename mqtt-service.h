@@ -91,7 +91,7 @@ int mqtt_connect(ip_addr_t* address, uint16_t port,
 // Starts an asynchronous disconnect from the server.
 // The calling process will receive a mqtt_event of type
 // MQTT_EVENT_TYPE_EXITED when the operation is complete.
-int mqtt_disconnect();
+int mqtt_disconnect(void);
 
 // Starts an asynchronous subscribe to the specified topic
 // The calling process will receive a mqtt_event of type
@@ -119,11 +119,11 @@ static inline int mqtt_publish(const char* topic, const char* data, int qos, int
 }
 
 
-static inline int mqtt_connected()
+static inline int mqtt_connected(void)
 {
   return (mqtt_flags & MQTT_FLAG_CONNECTED);
 }
-static inline int mqtt_ready()
+static inline int mqtt_ready(void)
 {
   return (mqtt_flags & MQTT_FLAG_READY);
 }

@@ -100,14 +100,14 @@ int mqtt_connect(ip_addr_t* address, uint16_t port, int auto_reconnect, mqtt_con
   mqtt_state.connect_info = info;
   mqtt_state.calling_process = calling_process;
 
-  xTaskCreate(mqtt_process, "mqtt", 2048, NULL, 5, &mqtt_internal);
+  xTaskCreate(mqtt_process, "mqtt", 3072, NULL, 5, &mqtt_internal);
   mqtt_external = NULL;
 
   return 0;
 }
 
 // Disconnect from the server
-int mqtt_disconnect()
+int mqtt_disconnect(void)
 {
   if(mqtt_internal)
     return -1;
@@ -138,7 +138,7 @@ int mqtt_subscribe(const char* topic)
   mqtt_external = xTaskGetCurrentTaskHandle();
   if(mqtt_internal == mqtt_external)
   {
-    send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
+    lwip_send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
     mqtt_state.outbound_message = NULL;
     mqtt_flags |= MQTT_FLAG_READY;
   }
@@ -163,7 +163,7 @@ int mqtt_unsubscribe(const char* topic)
   mqtt_external = xTaskGetCurrentTaskHandle();
   if(mqtt_internal == mqtt_external)
   {
-    send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
+    lwip_send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
     mqtt_state.outbound_message = NULL;
     mqtt_flags |= MQTT_FLAG_READY;
   }
@@ -191,7 +191,7 @@ int mqtt_publish_with_length(const char* topic, const char* data, int data_lengt
   mqtt_external = xTaskGetCurrentTaskHandle();
   if(mqtt_internal == mqtt_external)
   {
-    send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
+    lwip_send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
     mqtt_state.outbound_message = NULL;
     mqtt_flags |= MQTT_FLAG_READY;
   }
@@ -265,11 +265,11 @@ static void handle_mqtt_connection(mqtt_state_t* state)
   // Initialise and send CONNECT message
   mqtt_msg_init(&state->mqtt_connection, state->out_buffer, state->out_buffer_length);
   state->outbound_message = mqtt_msg_connect(&state->mqtt_connection, state->connect_info);
-  send(state->tcp_connection, state->outbound_message->data, state->outbound_message->length, 0);
+  lwip_send(state->tcp_connection, state->outbound_message->data, state->outbound_message->length, 0);
   state->outbound_message = NULL;
 
   // Wait for CONACK message
-  if(recv(state->tcp_connection, state->in_buffer, state->in_buffer_length, 0) < 2)
+  if(lwip_recv(state->tcp_connection, state->in_buffer, state->in_buffer_length, 0) < 2)
     return;
   if(mqtt_get_type(state->in_buffer) != MQTT_MSG_TYPE_CONNACK)
     return;
@@ -286,7 +286,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
     while(1)
     {
       char c;
-      if(recv(state->tcp_connection, &c, sizeof(c), MSG_PEEK | MSG_DONTWAIT) != -1)
+      if(lwip_recv(state->tcp_connection, &c, sizeof(c), MSG_PEEK | MSG_DONTWAIT) != -1)
         break;
       if(state->outbound_message != NULL)
         break;
@@ -299,7 +299,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
     // If there's a new message waiting to go out, then send it
     if(state->outbound_message != NULL)
     {
-      send(state->tcp_connection, state->outbound_message->data, state->outbound_message->length, 0);
+      lwip_send(state->tcp_connection, state->outbound_message->data, state->outbound_message->length, 0);
       state->outbound_message = NULL;
 
       // If it was a PUBLISH message with QoS-0 then tell the client it's done
@@ -312,7 +312,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
 
     // If we get here we must have woken for new incoming data, 
     // read and process it.
-    int16_t len = recv(state->tcp_connection, state->in_buffer, state->in_buffer_length, 0);
+    int16_t len = lwip_recv(state->tcp_connection, state->in_buffer, state->in_buffer_length, 0);
     if(len < 2)
       return;
 
@@ -367,7 +367,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
     //       statement due to the way protothreads resume.
     if(msg_type == MQTT_MSG_TYPE_PUBLISH)
     {
-      int16_t len;
+      uint16_t len;
 
       // adjust message_length and message_length_read so that
       // they only account for the publish data and not the rest of the 
@@ -382,7 +382,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
 
       while(state->message_length_read < state->message_length)
       {
-        len = recv(state->tcp_connection, state->in_buffer, state->message_length - state->message_length_read, 0);
+        ssize_t len = lwip_recv(state->tcp_connection, state->in_buffer, state->message_length - state->message_length_read, 0);
         if(len <= 0)
           return;
         deliver_publish_continuation(state, state->message_length_read, state->in_buffer, len);
@@ -399,17 +399,17 @@ void mqtt_process(void* arg)
   while(1)
   {
     ESP_LOGI(TAG, "mqtt: connecting...");
-    mqtt_state.tcp_connection = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    mqtt_state.tcp_connection = lwip_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if(mqtt_state.tcp_connection >= 0)
     {
       struct sockaddr_in sockaddr = {};
       sockaddr.sin_len = sizeof(sockaddr);
       sockaddr.sin_family = AF_INET;
       sockaddr.sin_port = htons(mqtt_state.port);
-      sockaddr.sin_addr.s_addr = mqtt_state.address.addr;
-      if(connect(mqtt_state.tcp_connection, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) != 0)
+      sockaddr.sin_addr.s_addr = mqtt_state.address.u_addr.ip4.addr;
+      if(lwip_connect(mqtt_state.tcp_connection, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) != 0)
       {
-        closesocket(mqtt_state.tcp_connection);
+        lwip_close(mqtt_state.tcp_connection);
         mqtt_state.tcp_connection = -1;
       }
     }
@@ -428,7 +428,7 @@ void mqtt_process(void* arg)
     {
       if(mqtt_flags & MQTT_FLAG_EXIT)
       {
-        closesocket(mqtt_state.tcp_connection);
+        lwip_close(mqtt_state.tcp_connection);
         mqtt_state.tcp_connection = -1;
 
         event_data.type = MQTT_EVENT_TYPE_EXITED;
@@ -439,10 +439,10 @@ void mqtt_process(void* arg)
 
       int opt = 0;
       socklen_t optlen = sizeof(opt);
-      getsockopt(mqtt_state.tcp_connection, SOL_SOCKET, SO_ERROR, &opt, &optlen);
+      lwip_getsockopt(mqtt_state.tcp_connection, SOL_SOCKET, SO_ERROR, &opt, &optlen);
       if(opt != 0)
       {
-        closesocket(mqtt_state.tcp_connection);
+        lwip_close(mqtt_state.tcp_connection);
         mqtt_state.tcp_connection = -1;
 
         event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
