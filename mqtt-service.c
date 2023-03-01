@@ -416,7 +416,7 @@ void mqtt_process(void* arg)
 
     if(mqtt_state.tcp_connection < 0)
     {
-      ESP_LOGI(TAG, "mqtt: connect failed");
+      ESP_LOGE(TAG, "mqtt: connect failed");
       continue;
     }
     else
@@ -447,7 +447,7 @@ void mqtt_process(void* arg)
 
         event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
         mqtt_state.calling_process(&event_data);
-        ESP_LOGI(TAG, "mqtt: lost connection: %s", "closed");
+        ESP_LOGE(TAG, "mqtt: lost connection: %s", "closed");
         break;
       }
       else
