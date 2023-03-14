@@ -36,6 +36,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <sys/queue.h>
 #include <sys/socket.h>
 
 #include "mqtt-service.h"
@@ -65,12 +66,20 @@ typedef struct mqtt_state_t
 
 } mqtt_state_t;
 
+typedef struct outbound_message {
+  int message_type;
+  mqtt_message_t message;
+  STAILQ_ENTRY(outbound_message) next;
+} outbound_message_t;
+STAILQ_HEAD(outbound_message_list_t, outbound_message);
+
 void mqtt_process(void* arg);
 
 TaskHandle_t mqtt_internal IRAM_BSS_ATTR;
 TaskHandle_t mqtt_external IRAM_BSS_ATTR;
 mqtt_state_t mqtt_state;
 int mqtt_flags IRAM_BSS_ATTR;
+struct outbound_message_list_t* mqtt_outbound_message_list IRAM_BSS_ATTR;
 
 
 /*********************************************************************
@@ -86,6 +95,9 @@ void mqtt_init(uint8_t* in_buffer, int in_buffer_length, uint8_t* out_buffer, in
   mqtt_state.in_buffer_length = in_buffer_length;
   mqtt_state.out_buffer = out_buffer;
   mqtt_state.out_buffer_length = out_buffer_length;
+
+  mqtt_outbound_message_list = calloc(1, sizeof(struct outbound_message_list_t));
+  STAILQ_INIT(mqtt_outbound_message_list);
 }
 
 // Connect to the specified server
@@ -130,22 +142,16 @@ int mqtt_subscribe(const char* topic)
     return -1;
 
   ESP_LOGD(TAG, "mqtt: sending subscribe...");
-  mqtt_state.outbound_message = mqtt_msg_subscribe(&mqtt_state.mqtt_connection, 
+  mqtt_state.outbound_message = mqtt_msg_subscribe(&mqtt_state.mqtt_connection,
                                                    topic, 0, 
                                                    &mqtt_state.pending_msg_id);
-  mqtt_flags &= ~MQTT_FLAG_READY;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SUBSCRIBE;
-  mqtt_external = xTaskGetCurrentTaskHandle();
-  if(mqtt_internal == mqtt_external)
-  {
-    lwip_send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
-    mqtt_state.outbound_message = NULL;
-    mqtt_flags |= MQTT_FLAG_READY;
-  }
-  else
-  {
-    ulTaskNotifyTake(pdTRUE, 3000 / portTICK_PERIOD_MS);
-  }
+  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t));
+  outbound->message_type = MQTT_MSG_TYPE_SUBSCRIBE;
+  outbound->message.data = malloc(mqtt_state.outbound_message->length);
+  outbound->message.length = mqtt_state.outbound_message->length;
+  memcpy(outbound->message.data, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length);
+  STAILQ_INSERT_TAIL(mqtt_outbound_message_list, outbound, next);
+  mqtt_state.outbound_message = NULL;
 
   return 0;
 }
@@ -158,19 +164,13 @@ int mqtt_unsubscribe(const char* topic)
   ESP_LOGD(TAG, "sending unsubscribe");
   mqtt_state.outbound_message = mqtt_msg_unsubscribe(&mqtt_state.mqtt_connection, topic, 
                                                      &mqtt_state.pending_msg_id);
-  mqtt_flags &= ~MQTT_FLAG_READY;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
-  mqtt_external = xTaskGetCurrentTaskHandle();
-  if(mqtt_internal == mqtt_external)
-  {
-    lwip_send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
-    mqtt_state.outbound_message = NULL;
-    mqtt_flags |= MQTT_FLAG_READY;
-  }
-  else
-  {
-    ulTaskNotifyTake(pdTRUE, 3000 / portTICK_PERIOD_MS);
-  }
+  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t));
+  outbound->message_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
+  outbound->message.data = malloc(mqtt_state.outbound_message->length);
+  outbound->message.length = mqtt_state.outbound_message->length;
+  memcpy(outbound->message.data, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length);
+  STAILQ_INSERT_TAIL(mqtt_outbound_message_list, outbound, next);
+  mqtt_state.outbound_message = NULL;
 
   return 0;
 }
@@ -186,19 +186,13 @@ int mqtt_publish_with_length(const char* topic, const char* data, int data_lengt
                                                  topic, data, data_length, 
                                                  qos, retain,
                                                  &mqtt_state.pending_msg_id);
-  mqtt_flags &= ~MQTT_FLAG_READY;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_PUBLISH;
-  mqtt_external = xTaskGetCurrentTaskHandle();
-  if(mqtt_internal == mqtt_external)
-  {
-    lwip_send(mqtt_state.tcp_connection, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length, 0);
-    mqtt_state.outbound_message = NULL;
-    mqtt_flags |= MQTT_FLAG_READY;
-  }
-  else
-  {
-    ulTaskNotifyTake(pdTRUE, 3000 / portTICK_PERIOD_MS);
-  }
+  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t));
+  outbound->message_type = MQTT_MSG_TYPE_PUBLISH;
+  outbound->message.data = malloc(mqtt_state.outbound_message->length);
+  outbound->message.length = mqtt_state.outbound_message->length;
+  memcpy(outbound->message.data, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length);
+  STAILQ_INSERT_TAIL(mqtt_outbound_message_list, outbound, next);
+  mqtt_state.outbound_message = NULL;
 
   return 0;
 }
@@ -286,14 +280,13 @@ static void handle_mqtt_connection(mqtt_state_t* state)
     while(1)
     {
       char c;
-      if(lwip_recv(state->tcp_connection, &c, sizeof(c), MSG_PEEK | MSG_DONTWAIT) != -1)
-        break;
       if(state->outbound_message != NULL)
         break;
-      if(mqtt_flags & MQTT_FLAG_READY)
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-      else
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+      if(STAILQ_FIRST(mqtt_outbound_message_list))
+        break;
+      if(lwip_recv(state->tcp_connection, &c, sizeof(c), MSG_PEEK | MSG_DONTWAIT) != -1)
+        break;
+      vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
     // If there's a new message waiting to go out, then send it
@@ -307,6 +300,17 @@ static void handle_mqtt_connection(mqtt_state_t* state)
         complete_pending(state, MQTT_EVENT_TYPE_PUBLISHED);
 
       xTaskNotifyGive(mqtt_external);
+      continue;
+    }
+
+    if(STAILQ_FIRST(mqtt_outbound_message_list))
+    {
+      outbound_message_t* outbound = STAILQ_FIRST(mqtt_outbound_message_list);
+      STAILQ_REMOVE_HEAD(mqtt_outbound_message_list, next);
+
+      lwip_send(state->tcp_connection, outbound->message.data, outbound->message.length, 0);
+      free(outbound->message.data);
+      free(outbound);
       continue;
     }
 
