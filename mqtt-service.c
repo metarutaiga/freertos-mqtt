@@ -299,7 +299,6 @@ static void handle_mqtt_connection(mqtt_state_t* state)
       if(state->pending_msg_type == MQTT_MSG_TYPE_PUBLISH && state->pending_msg_id == 0)
         complete_pending(state, MQTT_EVENT_TYPE_PUBLISHED);
 
-      xTaskNotifyGive(mqtt_external);
       continue;
     }
 
@@ -465,6 +464,5 @@ void mqtt_process(void* arg)
 
   event_data.type = MQTT_EVENT_TYPE_EXITED;
   mqtt_state.calling_process(&event_data);
-  xTaskNotifyGive(mqtt_external);
   vTaskDelete(NULL);
 }
