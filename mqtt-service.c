@@ -67,9 +67,10 @@ typedef struct mqtt_state_t
 } mqtt_state_t;
 
 typedef struct outbound_message {
-  int message_type;
-  mqtt_message_t message;
   STAILQ_ENTRY(outbound_message) next;
+  int message_type;
+  int message_length;
+  char message_data[1];
 } outbound_message_t;
 STAILQ_HEAD(outbound_message_list_t, outbound_message);
 
@@ -142,16 +143,14 @@ int mqtt_subscribe(const char* topic)
     return -1;
 
   ESP_LOGD(TAG, "mqtt: sending subscribe...");
-  mqtt_state.outbound_message = mqtt_msg_subscribe(&mqtt_state.mqtt_connection,
-                                                   topic, 0, 
-                                                   &mqtt_state.pending_msg_id);
-  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t));
+  mqtt_message_t* outbound_message = mqtt_msg_subscribe(&mqtt_state.mqtt_connection,
+                                                        topic, 0,
+                                                        &mqtt_state.pending_msg_id);
+  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t) + outbound_message->length - 1);
   outbound->message_type = MQTT_MSG_TYPE_SUBSCRIBE;
-  outbound->message.data = malloc(mqtt_state.outbound_message->length);
-  outbound->message.length = mqtt_state.outbound_message->length;
-  memcpy(outbound->message.data, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length);
+  outbound->message_length = outbound_message->length;
+  memcpy(outbound->message_data, outbound_message->data, outbound_message->length);
   STAILQ_INSERT_TAIL(mqtt_outbound_message_list, outbound, next);
-  mqtt_state.outbound_message = NULL;
 
   return 0;
 }
@@ -162,15 +161,13 @@ int mqtt_unsubscribe(const char* topic)
     return -1;
 
   ESP_LOGD(TAG, "sending unsubscribe");
-  mqtt_state.outbound_message = mqtt_msg_unsubscribe(&mqtt_state.mqtt_connection, topic, 
-                                                     &mqtt_state.pending_msg_id);
-  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t));
+  mqtt_message_t* outbound_message = mqtt_msg_unsubscribe(&mqtt_state.mqtt_connection, topic,
+                                                          &mqtt_state.pending_msg_id);
+  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t) + outbound_message->length - 1);
   outbound->message_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
-  outbound->message.data = malloc(mqtt_state.outbound_message->length);
-  outbound->message.length = mqtt_state.outbound_message->length;
-  memcpy(outbound->message.data, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length);
+  outbound->message_length = outbound_message->length;
+  memcpy(outbound->message_data, outbound_message->data, outbound_message->length);
   STAILQ_INSERT_TAIL(mqtt_outbound_message_list, outbound, next);
-  mqtt_state.outbound_message = NULL;
 
   return 0;
 }
@@ -182,17 +179,15 @@ int mqtt_publish_with_length(const char* topic, const char* data, int data_lengt
     return -1;
 
   ESP_LOGD(TAG, "mqtt: sending publish...");
-  mqtt_state.outbound_message = mqtt_msg_publish(&mqtt_state.mqtt_connection, 
-                                                 topic, data, data_length, 
-                                                 qos, retain,
-                                                 &mqtt_state.pending_msg_id);
-  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t));
+  mqtt_message_t* outbound_message = mqtt_msg_publish(&mqtt_state.mqtt_connection,
+                                                      topic, data, data_length,
+                                                      qos, retain,
+                                                      &mqtt_state.pending_msg_id);
+  outbound_message_t* outbound = calloc(1, sizeof(outbound_message_t) + outbound_message->length - 1);
   outbound->message_type = MQTT_MSG_TYPE_PUBLISH;
-  outbound->message.data = malloc(mqtt_state.outbound_message->length);
-  outbound->message.length = mqtt_state.outbound_message->length;
-  memcpy(outbound->message.data, mqtt_state.outbound_message->data, mqtt_state.outbound_message->length);
+  outbound->message_length = outbound_message->length;
+  memcpy(outbound->message_data, outbound_message->data, outbound_message->length);
   STAILQ_INSERT_TAIL(mqtt_outbound_message_list, outbound, next);
-  mqtt_state.outbound_message = NULL;
 
   return 0;
 }
@@ -307,8 +302,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
       outbound_message_t* outbound = STAILQ_FIRST(mqtt_outbound_message_list);
       STAILQ_REMOVE_HEAD(mqtt_outbound_message_list, next);
 
-      lwip_send(state->tcp_connection, outbound->message.data, outbound->message.length, 0);
-      free(outbound->message.data);
+      lwip_send(state->tcp_connection, outbound->message_data, outbound->message_length, 0);
       free(outbound);
       continue;
     }
