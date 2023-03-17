@@ -374,6 +374,10 @@ static void handle_mqtt_connection(mqtt_state_t* state)
       len = state->message_length_read;
       mqtt_get_publish_data(state->in_buffer, &len);
       len = state->message_length_read - len;
+      if (len > state->message_length)
+        continue;
+      if (len > state->message_length_read)
+        continue;
       state->message_length -= len;
       state->message_length_read -= len;
 
