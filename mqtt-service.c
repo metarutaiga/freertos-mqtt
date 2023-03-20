@@ -281,6 +281,8 @@ static void handle_mqtt_connection(mqtt_state_t* state)
         break;
       if(lwip_recv(state->tcp_connection, &c, sizeof(c), MSG_PEEK | MSG_DONTWAIT) != -1)
         break;
+      if(errno != EAGAIN)
+        return;
       vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
@@ -309,12 +311,21 @@ static void handle_mqtt_connection(mqtt_state_t* state)
 
     // If we get here we must have woken for new incoming data, 
     // read and process it.
-    int16_t len = lwip_recv(state->tcp_connection, state->in_buffer, state->in_buffer_length, 0);
+    int16_t len = lwip_recv(state->tcp_connection, state->in_buffer, 5, 0);
     if(len < 2)
       return;
 
     state->message_length_read = len;
     state->message_length = mqtt_get_total_length(state->in_buffer, state->message_length_read);
+    if(state->message_length != state->message_length_read)
+    {
+      if(state->message_length > state->in_buffer_length - 2)
+        return;
+      len = lwip_recv(state->tcp_connection, state->in_buffer + len, state->message_length - len, 0);
+      if(len <= 0)
+        return;
+      state->message_length_read += len;
+    }
 
     msg_type = mqtt_get_type(state->in_buffer);
     msg_qos  = mqtt_get_qos(state->in_buffer);
@@ -374,10 +385,6 @@ static void handle_mqtt_connection(mqtt_state_t* state)
       len = state->message_length_read;
       mqtt_get_publish_data(state->in_buffer, &len);
       len = state->message_length_read - len;
-      if (len > state->message_length)
-        continue;
-      if (len > state->message_length_read)
-        continue;
       state->message_length -= len;
       state->message_length_read -= len;
 
@@ -424,36 +431,20 @@ void mqtt_process(void* arg)
       ESP_LOGI(TAG, "mqtt: connected");
 
     handle_mqtt_connection(&mqtt_state);
+    lwip_close(mqtt_state.tcp_connection);
+    mqtt_state.tcp_connection = -1;
 
-    while(1)
+    if(mqtt_flags & MQTT_FLAG_EXIT)
     {
-      if(mqtt_flags & MQTT_FLAG_EXIT)
-      {
-        lwip_close(mqtt_state.tcp_connection);
-        mqtt_state.tcp_connection = -1;
-
-        event_data.type = MQTT_EVENT_TYPE_EXITED;
-        mqtt_state.calling_process(&event_data);
-        xTaskNotifyGive(mqtt_external);
-        vTaskDelete(NULL);
-      }
-
-      int opt = 0;
-      socklen_t optlen = sizeof(opt);
-      lwip_getsockopt(mqtt_state.tcp_connection, SOL_SOCKET, SO_ERROR, &opt, &optlen);
-      if(opt != 0)
-      {
-        lwip_close(mqtt_state.tcp_connection);
-        mqtt_state.tcp_connection = -1;
-
-        event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
-        mqtt_state.calling_process(&event_data);
-        ESP_LOGE(TAG, "mqtt: lost connection: %s", "closed");
-        break;
-      }
-      else
-        handle_mqtt_connection(&mqtt_state);
+      event_data.type = MQTT_EVENT_TYPE_EXITED;
+      mqtt_state.calling_process(&event_data);
+      xTaskNotifyGive(mqtt_external);
+      vTaskDelete(NULL);
     }
+
+    event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
+    mqtt_state.calling_process(&event_data);
+    ESP_LOGE(TAG, "mqtt: lost connection: %s", "closed");
 
     if(!mqtt_state.auto_reconnect)
       break;
