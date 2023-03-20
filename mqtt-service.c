@@ -425,27 +425,27 @@ void mqtt_process(void* arg)
     if(mqtt_state.tcp_connection < 0)
     {
       ESP_LOGE(TAG, "mqtt: connect failed");
-      continue;
     }
     else
+    {
       ESP_LOGI(TAG, "mqtt: connected");
 
-    handle_mqtt_connection(&mqtt_state);
-    lwip_close(mqtt_state.tcp_connection);
-    mqtt_state.tcp_connection = -1;
+      handle_mqtt_connection(&mqtt_state);
+      lwip_close(mqtt_state.tcp_connection);
+      mqtt_state.tcp_connection = -1;
 
-    if(mqtt_flags & MQTT_FLAG_EXIT)
-    {
-      event_data.type = MQTT_EVENT_TYPE_EXITED;
+      if(mqtt_flags & MQTT_FLAG_EXIT)
+      {
+        event_data.type = MQTT_EVENT_TYPE_EXITED;
+        mqtt_state.calling_process(&event_data);
+        xTaskNotifyGive(mqtt_external);
+        vTaskDelete(NULL);
+      }
+
+      event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
       mqtt_state.calling_process(&event_data);
-      xTaskNotifyGive(mqtt_external);
-      vTaskDelete(NULL);
+      ESP_LOGE(TAG, "mqtt: lost connection: %s", "closed");
     }
-
-    event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
-    mqtt_state.calling_process(&event_data);
-    ESP_LOGE(TAG, "mqtt: lost connection: %s", "closed");
-
     if(!mqtt_state.auto_reconnect)
       break;
     vTaskDelay(1000 / portTICK_PERIOD_MS);
