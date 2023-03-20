@@ -319,7 +319,7 @@ static void handle_mqtt_connection(mqtt_state_t* state)
     state->message_length = mqtt_get_total_length(state->in_buffer, state->message_length_read);
     if(state->message_length != state->message_length_read)
     {
-      if(state->message_length > state->in_buffer_length - 2)
+      if(state->message_length > state->in_buffer_length)
         return;
       len = lwip_recv(state->tcp_connection, state->in_buffer + len, state->message_length - len, 0);
       if(len <= 0)
