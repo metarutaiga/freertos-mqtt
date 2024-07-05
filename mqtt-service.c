@@ -441,6 +441,7 @@ void mqtt_process(void* arg)
         xTaskNotifyGive(mqtt_external);
         vTaskDelete(NULL);
       }
+      mqtt_flags &= ~(MQTT_FLAG_CONNECTED | MQTT_FLAG_READY);
 
       event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
       mqtt_state.calling_process(&event_data);
